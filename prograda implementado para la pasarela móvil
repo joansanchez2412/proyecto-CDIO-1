@@ -1,0 +1,294 @@
+#include "HX711.h"
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+#define DT1 5
+#define SCK1 4
+#define DT2 3
+#define SCK2 2
+#define led_verde 6   
+#define led_blanco 7    
+#define led_rojo 8 
+#define boton_emergencia 12
+#define boton_sentidogiro A0
+#define boton_on A1
+#define IN1 10
+#define IN2 11
+#define EN1 9
+
+HX711 bascula1;  
+HX711 bascula2;  
+
+float factor_calibracion = 415.92;
+float peso_anterior1 = 0;
+float peso_anterior2 = 0;
+float peso_actual1 = 0;
+float peso_actual2 = 0;
+float peso_final = 0;
+float umbral_cambio = 5.0;
+int pwm_actual=0;
+
+long leerHXSeguro(HX711 &bascula) {
+  const unsigned long timeout = 50; // Max 50 ms por lectura
+  unsigned long inicio = millis();
+
+  while (!bascula.is_ready()) {
+    if (millis() - inicio > timeout) {
+      return 0;  // Si se cuelga, devuelve 0 y NO reinicia Arduino
+    }
+  }
+
+  // Lectura real
+  return bascula.read();
+}
+
+float leerPeso(HX711 &bascula, int muestras) {
+  long suma = 0;
+  int leidas = 0;
+
+  for (int i = 0; i < muestras; i++) {
+    long valor = leerHXSeguro(bascula);
+    suma += valor;
+    leidas++;
+    delay(2); // Pequeña pausa para estabilidad
+  }
+
+  return (suma / (float)leidas) / factor_calibracion;
+}
+
+
+
+void setup() {
+  Serial.begin(9600);
+  pinMode(led_verde, OUTPUT);
+  pinMode(led_blanco, OUTPUT);
+  pinMode(led_rojo, OUTPUT);
+  pinMode(boton_emergencia,INPUT_PULLUP);
+  pinMode(boton_sentidogiro, INPUT_PULLUP);
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(EN1, OUTPUT);
+  pinMode(boton_on, INPUT_PULLUP);
+  
+  lcd.init();          
+  lcd.backlight();
+
+  bascula1.begin(DT1, SCK1);
+  bascula1.set_scale(factor_calibracion);
+  bascula1.tare();
+  
+  bascula2.begin(DT2, SCK2);
+  bascula2.set_scale(factor_calibracion);
+  bascula2.tare();
+  
+  delay(2000);
+  Serial.println("Sistema iniciado");
+}
+
+void loop() {
+  int estado_emergencia=digitalRead(boton_emergencia);
+  int estado_giro=digitalRead(boton_sentidogiro);
+  int estado_boton=digitalRead(boton_on);
+  if (estado_boton == HIGH){
+    if (estado_emergencia == HIGH){
+      lcd.display();
+      lcd.backlight();
+      // Lee peso actual de ambas básculas
+      peso_actual1 = leerPeso(bascula1, 5);  // 5 lecturas rápidas
+      peso_actual2 = leerPeso(bascula2, 5);
+      
+      // Filtra valores pequeños (ruido)
+      if (abs(peso_actual1) < 2) {
+        peso_actual1 = 0;
+      }
+      if (abs(peso_actual2) < 2) {
+        peso_actual2 = 0;
+      }
+      
+      if (estado_giro == LOW){
+        digitalWrite(IN1, HIGH);
+        digitalWrite(IN2, LOW);
+        
+        // Detecta cambio en báscula 1 (agregado)
+        float cambio1 = peso_actual1 - peso_anterior1;
+        if (cambio1<0){
+          cambio1=0;
+        }
+        if (cambio1 > umbral_cambio) {
+          peso_final += cambio1;
+          Serial.print("Peso agregado: ");
+          Serial.print(cambio1);
+          Serial.println(" g");
+        }
+        
+        // Detecta cambio en báscula 2 (restado)
+        float cambio2 = peso_actual2 - peso_anterior2;
+        if (cambio2<0){
+          cambio2=0;
+        }
+        if (cambio2 > umbral_cambio) {
+          peso_final -= cambio2;
+          Serial.print("Peso restado: ");
+          Serial.print(cambio2);
+          Serial.println(" g");
+        }
+        
+        if (peso_final>=0 && peso_final<300){
+          pwm_actual=192;
+          analogWrite(EN1, pwm_actual);
+          lcd.clear();
+          lcd.setCursor(0,1);
+          lcd.print("vel: 0.5m/s");  
+          lcd.setCursor(0, 0); 
+          lcd.print("peso:");
+          lcd.print(peso_final, 1);
+          lcd.print("g"); 
+        }else if (peso_final >=300 && peso_final <400){
+          pwm_actual=249;
+          analogWrite(EN1, pwm_actual);
+          lcd.clear();
+          lcd.setCursor(0,1);
+          lcd.print("vel: 0.65m/s");  
+          lcd.setCursor(0, 0); 
+          lcd.print("peso:");
+          lcd.print(peso_final, 1);
+          lcd.print("g"); 
+        } else{
+          pwm_actual=0;
+          analogWrite(EN1, pwm_actual);
+          lcd.clear();
+          lcd.setCursor(0,1);
+          lcd.print("vel: 0m/s");  
+          lcd.setCursor(0, 0); 
+          lcd.print("peso:");
+          lcd.print(peso_final, 1);
+          lcd.print("g"); 
+        }
+        delay(1000);
+
+        if (peso_final>=0 && peso_final<300 ){
+          digitalWrite(led_verde, HIGH);
+          digitalWrite(led_blanco, LOW);
+          digitalWrite(led_rojo, LOW);
+        } else if (peso_final>=300 && peso_final <400){
+          digitalWrite(led_blanco,HIGH);
+          digitalWrite(led_verde, LOW);
+          digitalWrite(led_rojo, LOW);
+        } else {
+          digitalWrite(led_rojo, HIGH);
+          digitalWrite(led_blanco, LOW);
+          digitalWrite(led_verde, LOW);
+        }
+        
+      }else if (estado_giro == HIGH){
+        digitalWrite(IN1, LOW);
+        digitalWrite(IN2, HIGH);
+        
+        // Detecta cambio en báscula 2 (agregado)
+        float cambio2 = peso_actual2 - peso_anterior2;
+        if (cambio2<0){
+          cambio2=0;
+        }
+        if (cambio2 > umbral_cambio) {
+          peso_final += cambio2;
+          Serial.print("Peso agregado: ");
+          Serial.print(cambio2);
+          Serial.println(" g");
+        }
+        
+        // Detecta cambio en báscula 1 (restado)
+        float cambio1 = peso_actual1 - peso_anterior1;
+        if (cambio1<0){
+          cambio1=0;
+        }
+        if (cambio1 > umbral_cambio) {
+          peso_final -= cambio1;
+          Serial.print("Peso restado: ");
+          Serial.print(cambio1);
+          Serial.println(" g");
+        }
+        
+        if (peso_final>=0 && peso_final<300){
+          pwm_actual=192;
+          analogWrite(EN1, pwm_actual);
+          lcd.clear();
+          lcd.setCursor(0,1);
+          lcd.print("vel: 0.5m/s");  
+          lcd.setCursor(0, 0); 
+          lcd.print("peso:");
+          lcd.print(peso_final, 1);
+          lcd.print("g"); 
+        }else if (peso_final >=300 && peso_final <400){
+          pwm_actual=249;
+          analogWrite(EN1, pwm_actual);
+          lcd.clear();
+          lcd.setCursor(0,1);
+          lcd.print("vel: 0.65m/s");  
+          lcd.setCursor(0, 0); 
+          lcd.print("peso:");
+          lcd.print(peso_final, 1);
+          lcd.print("g");
+        } else{
+          pwm_actual=0;
+          analogWrite(EN1, pwm_actual);
+          lcd.clear();
+          lcd.setCursor(0,1);
+          lcd.print("vel: 0m/s");  
+          lcd.setCursor(0, 0); 
+          lcd.print("peso:");
+          lcd.print(peso_final, 1);
+          lcd.print("g");
+        }
+        delay(1000);
+
+        if (peso_final>0 && peso_final<300 ){
+          digitalWrite(led_verde, HIGH);
+          digitalWrite(led_blanco, LOW);
+          digitalWrite(led_rojo, LOW);
+        } else if (peso_final>=300 && peso_final <400){
+          digitalWrite(led_blanco,HIGH);
+          digitalWrite(led_verde, LOW);
+          digitalWrite(led_rojo, LOW);
+        } else if (peso_final>=400){
+          digitalWrite(led_rojo, HIGH);
+          digitalWrite(led_blanco, LOW);
+          digitalWrite(led_verde, LOW);
+        }
+      }if (peso_final<0){
+        peso_final=0;
+      }
+      
+      peso_anterior1 = peso_actual1;
+      peso_anterior2 = peso_actual2;
+      
+    } else {
+      analogWrite(EN1, 0);        
+      digitalWrite(IN1, LOW);
+      digitalWrite(IN2, LOW);
+      
+      digitalWrite(led_blanco, LOW);
+      digitalWrite(led_verde, LOW);
+      digitalWrite(led_rojo, HIGH);  
+      lcd.clear();
+      lcd.setCursor(0,0);
+      lcd.print("EMERGENCIA ACTIVADA");
+
+      while (digitalRead(boton_emergencia) == LOW) {
+        delay(100);
+      }
+    }
+  } else{
+      digitalWrite(led_blanco, LOW);
+      digitalWrite(led_verde, LOW);
+      digitalWrite(led_rojo, LOW);
+      digitalWrite(IN1, LOW);
+      digitalWrite(IN2, LOW);
+      analogWrite(EN1, 0);
+      lcd.clear();
+      lcd.noBacklight();
+
+  }  
+  
+}
